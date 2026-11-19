@@ -1,11 +1,20 @@
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.db import connect
-from app.seed import idle_timeout_sec
+from app.modules import timeout_change_no_rewrite as tcnr
 from app.services import ingest as ingest_svc
 from app.services import sessions as sess_svc
 
 router = APIRouter(prefix="/api")
+
+
+class IngestBody(BaseModel):
+    fixture: str | None = None
+
+
+class TimeoutBody(BaseModel):
+    idle_timeout_sec: int
 
 
 @router.get("/overview")
@@ -19,7 +28,7 @@ def overview():
                 "SELECT COUNT(*) AS c FROM hits WHERE channel='primary'"
             ).fetchone()["c"],
             "quarantine": conn.execute("SELECT COUNT(*) AS c FROM quarantine").fetchone()["c"],
-            "idle_timeout_sec": idle_timeout_sec(conn),
+            **tcnr.current_config(conn),
         }
     finally:
         conn.close()
@@ -71,8 +80,14 @@ def list_quarantine():
 
 
 @router.post("/ingest/run")
-def run_ingest():
-    return ingest_svc.run_batch()
+def run_ingest(body: IngestBody | None = None):
+    fixture = body.fixture if body and body.fixture else "ingest_batch.json"
+    if "/" in fixture or "\\" in fixture or fixture.startswith("."):
+        raise HTTPException(400, "夹具名不合法")
+    result = ingest_svc.run_batch(fixture)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "收流失败"))
+    return result
 
 
 @router.get("/session-proofs")
@@ -97,23 +112,51 @@ def session_proofs(session_id: str | None = None):
 def get_settings():
     conn = connect()
     try:
-        return {"idle_timeout_sec": idle_timeout_sec(conn)}
+        return {
+            **tcnr.current_config(conn),
+            "min_idle_timeout_sec": tcnr.MIN_TIMEOUT_SEC,
+        }
     finally:
         conn.close()
 
 
 @router.put("/settings/idle-timeout")
-def put_idle_timeout(body: dict):
-    sec = int(body.get("idle_timeout_sec", 1800))
-    if sec < 60:
-        raise HTTPException(400, "空闲超时至少 60 秒")
+def put_idle_timeout(body: TimeoutBody):
+    """单事务：写新配置版本 + 更新设置；失败整笔回滚。
+
+    「重切历史」入口固定拒绝，见 POST /resplit-history。
+    """
     conn = connect()
     try:
-        conn.execute(
-            "INSERT OR REPLACE INTO settings(key, value) VALUES ('idle_timeout_sec', ?)",
-            (str(sec),),
-        )
-        conn.commit()
-        return {"idle_timeout_sec": sec}
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = tcnr.change_timeout(conn, body.idle_timeout_sec, source="settings")
+            conn.commit()
+        except tcnr.ConfigError as e:
+            conn.rollback()
+            raise HTTPException(400, str(e))
+        except Exception:
+            conn.rollback()
+            raise
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/resplit-history")
+def resplit_history():
+    """「重切历史」入口：固定拒绝，不在 closed 上搬成员或改切分边。"""
+    try:
+        tcnr.reject_resplit_history()
+    except tcnr.RewriteRejected as e:
+        raise HTTPException(409, str(e))
+
+
+@router.get("/config-audit")
+def config_audit():
+    """配置变更核证：只读，不产生任何写入。"""
+    conn = connect()
+    try:
+        return tcnr.audit(conn)
     finally:
         conn.close()

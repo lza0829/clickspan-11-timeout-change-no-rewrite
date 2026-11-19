@@ -34,8 +34,17 @@ def session_detail(conn, session_id: str):
         "SELECT * FROM session_proofs WHERE session_id=? ORDER BY id DESC LIMIT 1",
         (session_id,),
     ).fetchone()
+    cuts = conn.execute(
+        """
+        SELECT * FROM session_cuts
+        WHERE prev_session_id=? OR next_session_id=?
+        ORDER BY id
+        """,
+        (session_id, session_id),
+    ).fetchall()
     return {
         "session": dict(sess),
         "hits": [dict(h) for h in hits],
         "proof": dict(proof) if proof else None,
+        "cuts": [dict(c) for c in cuts],
     }

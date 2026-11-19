@@ -1,6 +1,6 @@
 import json
 
-from app.db import FIXTURES_DIR, connect
+from app.db import connect, fixtures_dir
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -58,7 +58,92 @@ CREATE TABLE IF NOT EXISTS session_proofs (
   ended_at TEXT,
   created_at TEXT NOT NULL
 );
+
+-- 配置版本表（改切窗不回溯的落库形态）：只追加，不改历史行。
+CREATE TABLE IF NOT EXISTS config_versions (
+  version INTEGER PRIMARY KEY AUTOINCREMENT,
+  idle_timeout_sec INTEGER NOT NULL,
+  previous_sec INTEGER,
+  source TEXT NOT NULL DEFAULT 'settings',
+  created_at TEXT NOT NULL
+);
+
+-- 切分边快照（append-only）：记录每次切开时所用的超时与配置版本。
+CREATE TABLE IF NOT EXISTS session_cuts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_id TEXT NOT NULL,
+  prev_session_id TEXT NOT NULL,
+  next_session_id TEXT NOT NULL,
+  prev_last_ts TEXT NOT NULL,
+  next_first_ts TEXT NOT NULL,
+  gap_sec INTEGER NOT NULL,
+  timeout_sec_used INTEGER NOT NULL,
+  config_version INTEGER,
+  reason TEXT NOT NULL DEFAULT 'idle_timeout',
+  created_at TEXT NOT NULL
+);
+
+-- 失败闭的库级兜底：切分边与配置版本只可插入，不可改写/删除。
+CREATE TRIGGER IF NOT EXISTS trg_cuts_no_update
+BEFORE UPDATE ON session_cuts
+BEGIN SELECT RAISE(ABORT, '禁止改写切分边快照'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cuts_no_delete
+BEFORE DELETE ON session_cuts
+BEGIN SELECT RAISE(ABORT, '禁止删除切分边快照'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_config_versions_no_update
+BEFORE UPDATE ON config_versions
+BEGIN SELECT RAISE(ABORT, '禁止改写配置版本'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_config_versions_no_delete
+BEFORE DELETE ON config_versions
+BEGIN SELECT RAISE(ABORT, '禁止删除配置版本'); END;
+
+-- closed 会话成员封闭：不得再挂入击点，也不得把成员迁出/迁入 closed。
+CREATE TRIGGER IF NOT EXISTS trg_hits_no_insert_into_closed
+BEFORE INSERT ON hits
+WHEN NEW.session_id IS NOT NULL
+ AND (SELECT status FROM sessions WHERE id = NEW.session_id) = 'closed'
+BEGIN SELECT RAISE(ABORT, '禁止向 closed 会话挂入击点'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hits_no_move_out_of_closed
+BEFORE UPDATE OF session_id ON hits
+WHEN OLD.session_id IS NOT NULL
+ AND OLD.session_id IS NOT NEW.session_id
+ AND (SELECT status FROM sessions WHERE id = OLD.session_id) = 'closed'
+BEGIN SELECT RAISE(ABORT, '禁止从 closed 会话迁出击点'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hits_no_move_into_closed
+BEFORE UPDATE OF session_id ON hits
+WHEN NEW.session_id IS NOT NULL
+ AND OLD.session_id IS NOT NEW.session_id
+ AND (SELECT status FROM sessions WHERE id = NEW.session_id) = 'closed'
+BEGIN SELECT RAISE(ABORT, '禁止向 closed 会话迁入击点'); END;
 """
+
+TIDY_COLUMNS = {
+    # 落库形态选「配置版本表」：会话不绑定 timeout_sec_snapshot。
+    "session_cuts": {
+        "config_version": "INTEGER",
+        "reason": "TEXT NOT NULL DEFAULT 'idle_timeout'",
+    },
+}
+
+
+def _migrate(conn):
+    """老库补列；配置版本表基线由功能模块补齐。"""
+    from app.modules import timeout_change_no_rewrite as tcnr
+
+    for table, cols in TIDY_COLUMNS.items():
+        have = {
+            r["name"]
+            for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, decl in cols.items():
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    tcnr.ensure_baseline(conn)
 
 
 def init_db():
@@ -70,6 +155,7 @@ def init_db():
             "INSERT INTO settings(key, value) VALUES ('idle_timeout_sec', ?)",
             ("1800",),
         )
+    _migrate(conn)
     n = conn.execute("SELECT COUNT(*) AS c FROM visitors").fetchone()["c"]
     if n == 0:
         _seed_fixtures(conn)
@@ -78,7 +164,7 @@ def init_db():
 
 
 def _seed_fixtures(conn):
-    fixture = FIXTURES_DIR / "seed_hits.json"
+    fixture = fixtures_dir() / "seed_hits.json"
     if not fixture.exists():
         return
     data = json.loads(fixture.read_text(encoding="utf-8"))

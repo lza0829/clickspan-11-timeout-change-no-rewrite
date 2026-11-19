@@ -33,14 +33,15 @@ onMounted(load)
       <div class="stat"><b>{{ overview.hits_primary }}</b><span>正式击点</span></div>
       <div class="stat"><b>{{ overview.quarantine }}</b><span>隔离</span></div>
       <div class="stat"><b>{{ overview.idle_timeout_sec }}s</b><span>空闲超时</span></div>
+      <div class="stat"><b>v{{ overview.config_version }}</b><span>配置版本</span></div>
     </div>
     <p v-if="err" class="err">{{ err }}</p>
 
     <section class="panel">
       <h1>会话织机</h1>
-      <p class="muted">基座按访客整段挂会话；空闲切窗由空桩功能题实现。</p>
+      <p class="muted">按空闲间隙切开；closed 成员与切分边一旦定下不再回溯。</p>
       <div class="lane-list">
-        <article v-for="s in sessions" :key="s.id" class="lane">
+        <article v-for="s in sessions" :key="s.id" class="lane" :class="s.status">
           <div class="lane-head">
             <div>
               <strong>{{ s.id }}</strong>
@@ -56,6 +57,16 @@ onMounted(load)
                 <span>{{ h.page_path }}</span>
               </span>
             </template>
+          </div>
+          <div class="cuts" v-if="details[s.id] && details[s.id].cuts.length">
+            <span
+              v-for="c in details[s.id].cuts"
+              :key="c.id"
+              class="cut-tag mono"
+              :title="`间隙 ${c.gap_sec}s · 当时超时 ${c.timeout_sec_used}s`"
+            >
+              切 #{{ c.id }} {{ c.gap_sec }}s / {{ c.timeout_sec_used }}s · v{{ c.config_version ?? '—' }}
+            </span>
           </div>
         </article>
       </div>

@@ -159,6 +159,14 @@ a { color: inherit; text-decoration: none; }
   font-family: var(--sans);
 }
 .btn:hover { background: var(--copper); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.ghost {
+  background: transparent;
+  color: var(--char);
+  border: 1px solid var(--line);
+  margin-left: 0.45rem;
+}
+.btn.ghost:hover { background: #fff; border-color: var(--copper); }
 
 .stats {
   display: flex;
@@ -215,6 +223,27 @@ a { color: inherit; text-decoration: none; }
   width: 0.9rem;
   height: 2px;
   background: var(--copper-soft);
+}
+.lane.closed {
+  border-left-color: var(--copper);
+}
+.lane.open {
+  border-left-color: var(--cyan);
+}
+.cuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed var(--line);
+}
+.cut-tag {
+  padding: 0.2rem 0.5rem;
+  background: var(--copper-soft);
+  border: 1px solid #e0b294;
+  border-radius: 3px;
+  font-size: 0.72rem;
 }
 
 table.data {
